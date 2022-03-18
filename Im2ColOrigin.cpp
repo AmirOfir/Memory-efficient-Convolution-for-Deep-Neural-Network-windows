@@ -3,12 +3,34 @@
 #include <math.h>
 #include <iostream>
 #include <algorithm>
-#include <sys/time.h>
+#include <ctime>
 
+#if _WIN64
+void gemm_nn(int M, int N, int K, float ALPHA,
+    float* A, int lda,
+    float* B, int ldb,
+    float beta,
+    float* C, int ldc)
+{
+    int i, j, k;
+#pragma omp parallel for
+    for (i = 0; i < M; ++i) {
+        for (k = 0; k < K; ++k) {
+            float A_PART = ALPHA * A[i * lda + k];
+            for (j = 0; j < N; ++j) {
+                C[i * ldc + j] += A_PART * B[k * ldb + j];
+            }
+        }
+    }
+}
+#else
 extern"C"
 {
     #include<cblas.h>
 }
+#endif
+
+
 using namespace std;
 
 // 原始的Im2Col
@@ -62,10 +84,7 @@ int main(){
         }
     }
 
-    // 开始计时
-    struct timeval tstart, tend;
-    gettimeofday(&tstart, NULL);
-
+    
     // 对kernel进行Im2col
     float* kernel2col = new float[kernel_num*kernel_h*kernel_w];
     int cnt = 0;
@@ -76,6 +95,15 @@ int main(){
             }
         }
     }
+    
+    // 开始计时
+    // Changed using: https://www.cplusplus.com/reference/ctime/time/
+    struct tm y2k = { 0 };
+    y2k.tm_hour = 0;   y2k.tm_min = 0; y2k.tm_sec = 0;
+    y2k.tm_year = 100; y2k.tm_mon = 0; y2k.tm_mday = 1;
+
+    auto start = std::clock();
+
     // 对输入矩阵Im2col
     int outHeight = inHeight - kernel_h + 1;
     int outWidth = inWidth - kernel_w + 1;
@@ -84,14 +112,31 @@ int main(){
 
     // 使用Blas库实现矩阵乘法
     float *output = new float[kernel_num * outHeight * outWidth];
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,kernel_num,
-        outHeight*outWidth, kernel_w*kernel_h, 1,
-        kernel2col, kernel_h*kernel_w,
-        srcIm2col,outHeight * outWidth, 0, output, outHeight * outWidth);
+
+#if _WIN64
+    gemm_nn(
+#else
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+#endif
+        /* M: */        kernel_num,
+        /* N: */        outHeight * outWidth, 
+        /* K: */        kernel_w * kernel_h, 
+        /* Alpha: */    1,
+        /* *A: */       kernel2col, 
+        /* lda: */      kernel_h * kernel_w,
+        /* *B: */       srcIm2col,
+        /* ldb: */      outHeight * outWidth, 
+        /* beta: */     0, 
+        /* *C: */       output, 
+        /* ldc: */      outHeight * outWidth
+    );
 
     // 结束计时
-    gettimeofday(&tend, NULL);
-    cout<<"im2colOrigin Total time cost: "<<(tend.tv_sec-tstart.tv_sec)*1000 + (tend.tv_usec-tstart.tv_usec)/1000<<" ms"<<endl;
+    auto end = std::clock();
+    int repeat_count = 1;
+    float time_ms = 1000.0 * (end - start) / CLOCKS_PER_SEC / 1000.0 / repeat_count;
+    
+    cout<<"im2colOrigin Total time cost: " << time_ms <<" ms"<<endl;
 
     // 
     delete [] kernel2col;
